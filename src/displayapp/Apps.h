@@ -36,8 +36,10 @@ namespace Pinetime {
       SettingSteps,
       SettingSetDate,
       SettingSetTime,
-      Error,
-      FitVaardigLook,
+      SettingChimes,
+      SettingShakeThreshold,
+      SettingBluetooth,
+      Error
     };
   }
 }

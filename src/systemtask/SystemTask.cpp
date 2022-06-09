@@ -1,18 +1,10 @@
 #include "systemtask/SystemTask.h"
-#define min // workaround: nimble's min/max macros conflict with libstdc++
-#define max
-#include <host/ble_gap.h>
-#include <host/ble_gatt.h>
-#include <host/ble_hs_adv.h>
-#include <host/util/util.h>
-#include <nimble/hci_common.h>
-#undef max
-#undef min
 #include <hal/nrf_rtc.h>
 #include <libraries/gpiote/app_gpiote.h>
 #include <libraries/log/nrf_log.h>
 
 #include "BootloaderVersion.h"
+#include "components/battery/BatteryController.h"
 #include "components/ble/BleController.h"
 #include "drivers/Cst816s.h"
 #include "drivers/St7789.h"
@@ -115,7 +107,7 @@ SystemTask::SystemTask(Drivers::SpiMaster& spi,
 
 void SystemTask::Start() {
   systemTasksMsgQueue = xQueueCreate(10, 1);
-  if (pdPASS != xTaskCreate(SystemTask::Process, "MAIN", 350, this, 0, &taskHandle)) {
+  if (pdPASS != xTaskCreate(SystemTask::Process, "MAIN", 350, this, 1, &taskHandle)) {
     APP_ERROR_HANDLER(NRF_ERROR_NO_MEM);
   }
 }
@@ -197,13 +189,13 @@ void SystemTask::Work() {
   // Touchscreen
   nrf_gpio_cfg_sense_input(PinMap::Cst816sIrq,
                            static_cast<nrf_gpio_pin_pull_t>(GPIO_PIN_CNF_PULL_Pullup),
-                           static_cast<nrf_gpio_pin_sense_t> GPIO_PIN_CNF_SENSE_Low);
+                           static_cast<nrf_gpio_pin_sense_t>(GPIO_PIN_CNF_SENSE_Low));
 
   pinConfig.skip_gpio_setup = true;
   pinConfig.hi_accuracy = false;
   pinConfig.is_watcher = false;
   pinConfig.sense = static_cast<nrf_gpiote_polarity_t>(NRF_GPIOTE_POLARITY_HITOLO);
-  pinConfig.pull = static_cast<nrf_gpio_pin_pull_t> GPIO_PIN_CNF_PULL_Pullup;
+  pinConfig.pull = static_cast<nrf_gpio_pin_pull_t>(GPIO_PIN_CNF_PULL_Pullup);
 
   nrfx_gpiote_in_init(PinMap::Cst816sIrq, &pinConfig, nrfx_gpiote_evt_handler);
 
@@ -239,6 +231,7 @@ void SystemTask::Work() {
           if (!bleController.IsFirmwareUpdating()) {
             doNotGoToSleep = false;
           }
+          ReloadIdleTimer();
           break;
         case Messages::DisableSleeping:
           doNotGoToSleep = true;
@@ -261,7 +254,7 @@ void SystemTask::Work() {
           displayApp.PushMessage(Pinetime::Applications::Display::Messages::GoToRunning);
           heartRateApp.PushMessage(Pinetime::Applications::HeartRateTask::Messages::WakeUp);
 
-          if (!bleController.IsConnected()) {
+          if (bleController.IsRadioEnabled() && !bleController.IsConnected()) {
             nimbleController.RestartFastAdv();
           }
 
@@ -295,6 +288,9 @@ void SystemTask::Work() {
         case Messages::OnNewTime:
           ReloadIdleTimer();
           displayApp.PushMessage(Pinetime::Applications::Display::Messages::UpdateDateTime);
+          if (alarmController.State() == Controllers::AlarmController::AlarmState::Set) {
+            alarmController.ScheduleAlarm();
+          }
           break;
         case Messages::OnNewNotification:
           if (settingsController.GetNotificationStatus() == Pinetime::Controllers::Settings::Notification::ON) {
@@ -343,18 +339,18 @@ void SystemTask::Work() {
           xTimerStart(dimTimer, 0);
           break;
         case Messages::StartFileTransfer:
-          NRF_LOG_INFO("[systemtask] FS Started"); 
+          NRF_LOG_INFO("[systemtask] FS Started");
           doNotGoToSleep = true;
           if (isSleeping && !isWakingUp)
             GoToRunning();
-          //TODO add intent of fs access icon or something
+          // TODO add intent of fs access icon or something
           break;
         case Messages::StopFileTransfer:
           NRF_LOG_INFO("[systemtask] FS Stopped");
           doNotGoToSleep = false;
           xTimerStart(dimTimer, 0);
-           //TODO add intent of fs access icon or something
-           break;
+          // TODO add intent of fs access icon or something
+          break;
         case Messages::OnTouchEvent:
           if (touchHandler.GetNewTouchInfo()) {
             touchHandler.UpdateLvglTouchPoint();
@@ -403,6 +399,26 @@ void SystemTask::Work() {
           // Remember we'll have to reset the counter next time we're awake
           stepCounterMustBeReset = true;
           break;
+        case Messages::OnNewHour:
+          using Pinetime::Controllers::AlarmController;
+          if (settingsController.GetChimeOption() == Controllers::Settings::ChimesOption::Hours && alarmController.State() != AlarmController::AlarmState::Alerting) {
+            if (isSleeping && !isWakingUp) {
+              GoToRunning();
+              displayApp.PushMessage(Pinetime::Applications::Display::Messages::Clock);
+            }
+            motorController.RunForDuration(35);
+          }
+          break;
+        case Messages::OnNewHalfHour:
+          using Pinetime::Controllers::AlarmController;
+          if (settingsController.GetChimeOption() == Controllers::Settings::ChimesOption::HalfHours && alarmController.State() != AlarmController::AlarmState::Alerting) {
+            if (isSleeping && !isWakingUp) {
+              GoToRunning();
+              displayApp.PushMessage(Pinetime::Applications::Display::Messages::Clock);
+            }
+            motorController.RunForDuration(35);
+          }
+          break;
         case Messages::OnChargingEvent:
           batteryController.ReadPowerState();
           motorController.RunForDuration(15);
@@ -424,7 +440,13 @@ void SystemTask::Work() {
           motorController.RunForDuration(35);
           displayApp.PushMessage(Pinetime::Applications::Display::Messages::ShowPairingKey);
           break;
-
+        case Messages::BleRadioEnableToggle:
+          if(settingsController.GetBleRadioEnabled()) {
+            nimbleController.EnableRadio();
+          } else {
+            nimbleController.DisableRadio();
+          }
+          break;
         default:
           break;
       }
@@ -457,10 +479,10 @@ void SystemTask::UpdateMotion() {
     return;
   }
 
-  if (isSleeping && !settingsController.isWakeUpModeOn(Pinetime::Controllers::Settings::WakeUpMode::RaiseWrist)) {
+  if (isSleeping && !(settingsController.isWakeUpModeOn(Pinetime::Controllers::Settings::WakeUpMode::RaiseWrist) ||
+                      settingsController.isWakeUpModeOn(Pinetime::Controllers::Settings::WakeUpMode::Shake))) {
     return;
   }
-
   if (stepCounterMustBeReset) {
     motionSensor.ResetStepCounter();
     stepCounterMustBeReset = false;
@@ -470,7 +492,13 @@ void SystemTask::UpdateMotion() {
 
   motionController.IsSensorOk(motionSensor.IsOk());
   motionController.Update(motionValues.x, motionValues.y, motionValues.z, motionValues.steps);
-  if (motionController.ShouldWakeUp(isSleeping)) {
+
+  if (settingsController.isWakeUpModeOn(Pinetime::Controllers::Settings::WakeUpMode::RaiseWrist) &&
+      motionController.Should_RaiseWake(isSleeping)) {
+    GoToRunning();
+  }
+  if (settingsController.isWakeUpModeOn(Pinetime::Controllers::Settings::WakeUpMode::Shake) &&
+      motionController.Should_ShakeWake(settingsController.GetShakeThreshold())) {
     GoToRunning();
   }
 }
