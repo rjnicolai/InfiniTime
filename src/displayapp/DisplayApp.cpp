@@ -31,8 +31,6 @@
 #include "displayapp/screens/Steps.h"
 #include "displayapp/screens/PassKey.h"
 #include "displayapp/screens/Error.h"
-#include "displayapp/screens/FitVaardigLook.h"
-
 #include "drivers/Cst816s.h"
 #include "drivers/St7789.h"
 #include "drivers/Watchdog.h"
@@ -482,9 +480,6 @@ void DisplayApp::LoadApp(Apps app, DisplayApp::FullRefreshDirections direction) 
       break;
     case Apps::Steps:
       currentScreen = std::make_unique<Screens::Steps>(this, motionController, settingsController);
-      break;
-    case Apps::FitVaardigLook:
-      currentScreen = std::make_unique<Screens::FitVaardigLook>(this, motionController, *systemTask);
       break;
   }
   currentApp = app;
