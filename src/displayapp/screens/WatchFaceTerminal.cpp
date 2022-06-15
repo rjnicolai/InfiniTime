@@ -30,7 +30,7 @@ WatchFaceTerminal::WatchFaceTerminal(DisplayApp* app,
     settingsController {settingsController},
     heartRateController {heartRateController},
     motionController {motionController} {
-  settingsController.SetClockFace(3);
+  settingsController.SetClockFace(4);
 
   batteryValue = lv_label_create(lv_scr_act(), nullptr);
   lv_label_set_recolor(batteryValue, true);
